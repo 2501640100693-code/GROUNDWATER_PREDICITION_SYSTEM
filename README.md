@@ -34,8 +34,12 @@ imports another Builder's code, and there is no database.
 ## Quick start (local demo)
 
 ```bash
-# 1. Install dependencies (see requirements.txt — every version is pinned)
+# 1. Install dependencies (every version is pinned — see requirements.txt)
 pip install -r requirements.txt
+# Plus the graph-ML package. On platforms without torch-sparse/torch-scatter
+# wheels (Windows + Python 3.14 + torch 2.13) use --no-deps; on Linux a plain
+# install works. Builder 2 auto-detects either case.
+pip install --no-deps -r requirements-ml.txt    # or: pip install -r requirements-ml.txt
 
 # 2. Generate synthetic demo data (only needed because we have no real feed)
 python make_sample_data.py
@@ -70,6 +74,7 @@ python test_builder1_math.py
 | `app.py` | Streamlit dashboard: live map, sidebar alerts, per-station history + spliced 6-month forecast. |
 | `.streamlit/config.toml` | Dark "emergency monitoring" theme. |
 | `requirements.txt` | Pinned dependencies (every line is `package==version`). |
+| `requirements-ml.txt` | The graph-ML package (`torch-geometric-temporal==0.56.2`), pinned separately because it drags in compiled `torch-sparse`/`torch-scatter` extensions that have no wheel on every platform. |
 | `packages.txt` | Blank — no system packages needed for pure-Python deployment. |
 
 ---
@@ -149,11 +154,13 @@ Station_ID, Forecasted_SoE_Proxy_Pct, Forecast_Horizon_Months
 
 `torch-geometric-temporal` / `torch-geometric` are **heavy** (PyTorch +
 compiled graph kernels). The free Streamlit Cloud build can be slow or fail on
-these. For a local demo this repo pins them in `requirements.txt`; if you hit a
+these. For a local demo they're pinned in `requirements-ml.txt`; if you hit a
 Cloud build failure you have two options:
 
 1. Trim the heavy ML deps for the hosted app and run Builder 2 locally
-   (the dashboard itself only needs Streamlit, Folium, Plotly, pandas, numpy).
+   (the dashboard itself only needs Streamlit, Folium, Plotly, pandas, numpy —
+   remove `torch`, `torch-geometric`, and the `requirements-ml.txt` line from
+   the Cloud app's dependency files).
 2. Use `packages.txt` for any system-level pieces the build reports missing.
 
 The dashboard (`app.py`) is deliberately independent of PyTorch — it reads only

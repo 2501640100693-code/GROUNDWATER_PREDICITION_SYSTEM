@@ -1,0 +1,17 @@
+# AquaSentinel — graph-ML dependency for Builder 2 (the GCN-LSTM)
+#
+# One pinned line:  name==version.
+#
+# Install it one of two ways:
+#
+#   1) On platforms where torch-sparse / torch-scatter wheels exist (Linux):
+#          pip install -r requirements-ml.txt
+#
+#   2) On platforms without those wheels (e.g. Windows + Python 3.14 +
+#      torch 2.13), install WITHOUT its dependency tree — GConvLSTM never
+#      actually uses torch_sparse/torch_scatter, so nothing breaks:
+#          pip install --no-deps -r requirements-ml.txt
+#
+# Builder 2 auto-detects either case and loads the real GConvLSTM.
+
+torch-geometric-temporal==0.56.2

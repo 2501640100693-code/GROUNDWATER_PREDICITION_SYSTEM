@@ -11,7 +11,10 @@
       "Bash(python -c \"import torch_geometric_temporal; print\\('tg_temporal', torch_geometric_temporal.__version__\\)\")",
       "Bash(python *)",
       "Bash(mkdir -p /tmp/pkginfo)",
-      "Read(//tmp/**)"
+      "Read(//tmp/**)",
+      "Bash(streamlit run *)",
+      "Bash(curl -s http://localhost:8501/_stcore/health)",
+      "Bash(curl -s http://localhost:8501)"
     ]
   }
 }

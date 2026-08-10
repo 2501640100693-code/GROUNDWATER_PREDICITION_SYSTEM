@@ -47,14 +47,38 @@ try:
 except ImportError:
     raise SystemExit("statsmodels is required:  pip install statsmodels==<pinned>")
 
-try:
-    from torch_geometric_temporal.nn.recurrent import GConvLSTM
-except ImportError as exc:
-    raise SystemExit(
-        "torch_geometric_temporal is required. Install it with:\n"
-        "    pip install torch-geometric-temporal\n"
-        f"(underlying error: {exc})"
-    )
+def load_gconvlstm():
+    """Load torch_geometric_temporal's GConvLSTM (with a platform-safe fallback).
+
+    The package's top-level __init__ imports EVERY model, and one of them
+    (EvolveGCNO) requires `torch_sparse` — a C++ extension with no prebuilt
+    wheel on every torch/Python combination (e.g. Windows + Python 3.14).
+    GConvLSTM itself never uses torch_sparse, so when that unrelated extra is
+    missing we load the REAL gconv_lstm.py source directly instead of running
+    the package __init__. The returned class is the genuine GConvLSTM.
+    """
+    try:
+        from torch_geometric_temporal.nn.recurrent import GConvLSTM
+        return GConvLSTM
+    except ImportError:
+        import importlib.metadata as md
+        import importlib.util as iu
+
+        matches = [f.locate() for f in md.files("torch_geometric_temporal")
+                   if str(f).endswith("recurrent/gconv_lstm.py")]
+        if not matches:
+            raise SystemExit(
+                "torch_geometric_temporal is required. Install it with "
+                "`pip install torch-geometric-temporal`.")
+        print("[import] torch_sparse unavailable on this platform; loading "
+              "GConvLSTM directly from its source file (it never uses it).")
+        spec = iu.spec_from_file_location("temporal_gconv_lstm", matches[0])
+        module = iu.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.GConvLSTM
+
+
+GConvLSTM = load_gconvlstm()
 
 # ---------------------------------------------------------------------------
 # Tunable constants
@@ -86,7 +110,6 @@ def make_synthetic_stand_in():
     print("  Nothing is written to disk; a real file is never overwritten.")
     print("=" * 72)
 
-    rng = np.random.default_rng(7)
     rows = []
     station_ids = [f"SYN-{i:02d}" for i in range(8)]
     times = pd.date_range("2024-01-01", periods=24, freq="MS")
@@ -136,7 +159,7 @@ def chronological_split(df):
     return train_df, holdout_df
 
 
-def build_station_month_matrix(train_df, holdout_df, scaler):
+def build_station_month_matrix(train_df, holdout_df):
     """Return X_train [N,T], X_holdout [N,H], station_order, all scaled.
 
     Interior gaps are forward-filled (uses only the past — never the future).
@@ -222,7 +245,7 @@ def run_one_epoch(model, X, edge_index, edge_weight, t_start, t_stop, criterion)
     total = torch.tensor(0.0)
     for t in range(t_start, t_stop):
         h, c, pred = model(X[:, t:t + 1], edge_index, edge_weight, h, c)
-        total = total + criterion(pred, X[:, t + 1:t + 1])
+        total = total + criterion(pred, X[:, t + 1:t + 2])   # next timestep, [N,1]
     mean_loss = total / (t_stop - t_start)
     return mean_loss, h, c
 
@@ -253,7 +276,7 @@ def train_gcnlstm(model, X, edge_index, edge_weight):
             val_total = torch.tensor(0.0)
             for t in range(t_inner - 1, T - 1):
                 hv, cv, pred = model(X[:, t:t + 1], edge_index, edge_weight, hv, cv)
-                val_total = val_total + criterion(pred, X[:, t + 1:t + 1])
+                val_total = val_total + criterion(pred, X[:, t + 1:t + 2])
             val_loss = val_total / max(1, T - t_inner)
 
         if epoch == 1 or epoch % 10 == 0 or epoch == EPOCHS:
@@ -318,6 +341,21 @@ class PlainLSTM(nn.Module):
         self.fc = nn.Linear(hidden, 1)
 
 
+def _lstm_step(model, value, h, c):
+    """One LSTM step on a scalar `value`. Returns new (h, c) and prediction.
+
+    Everything is reshaped explicitly so the recurrent feedback never feeds a
+    flat 1-D tensor back into the LSTM (a classic shape bug).
+    """
+    x = torch.tensor([[[float(value)]]], dtype=torch.float32)   # [seq, batch, in]
+    if h is None:
+        out, (h, c) = model.lstm(x)
+    else:
+        out, (h, c) = model.lstm(x, (h, c))
+    pred = model.fc(out[-1])                                     # [1, 1]
+    return h, c, pred
+
+
 def _train_single_lstm(series, epochs=80):
     model = PlainLSTM()
     optimizer = optim.Adam(model.parameters(), lr=1e-2)
@@ -328,13 +366,8 @@ def _train_single_lstm(series, epochs=80):
         h = c = None
         total = torch.tensor(0.0)
         for t in range(T - 1):
-            x = torch.tensor([[series[t]]], dtype=torch.float32)    # [1,1,1]
-            if h is None:
-                out, (h, c) = model.lstm(x)
-            else:
-                out, (h, c) = model.lstm(x, (h, c))
-            pred = model.fc(out[-1])
-            target = torch.tensor([[series[t + 1]]], dtype=torch.float32)
+            h, c, pred = _lstm_step(model, series[t], h, c)
+            target = torch.tensor([[series[t + 1]]], dtype=torch.float32)   # [1,1]
             total = total + criterion(pred, target)
         (total / max(1, T - 1)).backward()
         optimizer.step()
@@ -342,19 +375,16 @@ def _train_single_lstm(series, epochs=80):
 
 
 def _recursive_single_lstm(model, last_value, horizon):
+    """Recursive multi-step forecast: each prediction feeds back in as input."""
     model.eval()
     h = c = None
+    preds = []
     with torch.no_grad():
-        x = torch.tensor([[last_value]], dtype=torch.float32)
-        preds = []
+        value = last_value
         for _ in range(horizon):
-            if h is None:
-                out, (h, c) = model.lstm(x)
-            else:
-                out, (h, c) = model.lstm(x, (h, c))
-            pred = model.fc(out[-1])
-            preds.append(pred.item())
-            x = pred
+            h, c, pred = _lstm_step(model, value, h, c)
+            value = float(pred.item())
+            preds.append(value)
     return np.array(preds)
 
 
@@ -394,7 +424,7 @@ def main():
           f"[{scaler.data_min_[0]:.2f}, {scaler.data_max_[0]:.2f}]")
 
     X_train, X_holdout, station_order = build_station_month_matrix(
-        train_df, holdout_df, scaler)
+        train_df, holdout_df)
     edge_index = build_edge_index(train_df, station_order)
     edge_weight = None
 
