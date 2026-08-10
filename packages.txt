@@ -1,4 +1,0 @@
-# Streamlit Community Cloud reads this file for system-level apt packages.
-# AquaSentinel uses only pure-Python dependencies, so this is intentionally
-# blank. If you later add a C-extension geospatial library (e.g. GDAL),
-# list it here.
