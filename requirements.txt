@@ -1,0 +1,23 @@
+# AquaSentinel — pinned Python dependencies
+#
+# Every package line is exactly  name==version   (no unpinned deps).
+# No stdlib packages are listed (os, datetime, ... ship with Python and break
+# the Streamlit Cloud container build).
+#
+# The graph-ML package torch-geometric-temporal lives in requirements-ml.txt:
+# it drags in compiled torch-sparse / torch-scatter extensions that have no
+# wheel on every platform (e.g. Windows + Python 3.14 + torch 2.13).
+#
+# Note for Streamlit Community Cloud: this set also installs PyTorch + PyG,
+# which are heavy for a free-tier build. app.py itself only needs the first
+# six packages — see README → "Deploying to Streamlit Community Cloud".
+
+streamlit==1.60.0
+streamlit-folium==0.27.3
+folium==0.20.0
+plotly==6.9.0
+pandas==2.3.3
+numpy==2.5.1
+
+
+
