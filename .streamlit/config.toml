@@ -1,0 +1,17 @@
+# AquaSentinel — Streamlit configuration
+# Dark "emergency monitoring" theme. Streamlit Community Cloud reads this file
+# automatically from the repo root.
+
+[theme]
+base = "dark"
+primaryColor = "#22d3ee"
+backgroundColor = "#0a0f1e"
+secondaryBackgroundColor = "#111a2e"
+textColor = "#e2e8f0"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false
+
+[server]
+headless = true

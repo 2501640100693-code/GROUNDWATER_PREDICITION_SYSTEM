@@ -1,0 +1,11 @@
+Block_ID,Net_Availability,Official_Category
+BLK-01,4.2,Over-Exploited
+BLK-02,4.8,Over-Exploited
+BLK-03,5.1,Critical
+BLK-04,5.6,Critical
+BLK-05,6.2,Semi-Critical
+BLK-06,6.8,Semi-Critical
+BLK-07,7.5,Safe
+BLK-08,4.5,Critical
+BLK-09,8.0,Safe
+BLK-10,4.9,Over-Exploited
