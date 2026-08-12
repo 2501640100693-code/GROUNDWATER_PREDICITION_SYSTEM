@@ -47,35 +47,51 @@ try:
 except ImportError:
     raise SystemExit("statsmodels is required:  pip install statsmodels==<pinned>")
 
-def load_gconvlstm():
-    """Load torch_geometric_temporal's GConvLSTM (with a platform-safe fallback).
+# Route every tensor and the model to a CUDA GPU when one is available,
+# else fall back to CPU. torch.cuda.is_available() alone is NOT reliable:
+# it returns True even when the installed build ships no kernel image for
+# the actual GPU (e.g. an RTX 50-series Blackwell card, capability sm_120,
+# against a cu121 wheel that only covers sm_50..sm_90), and even when
+# device_count() is 0 on Windows. So we probe with a real kernel launch.
+def _pick_device():
+    """Prefer CUDA, but only if an actual CUDA kernel can run on this GPU.
 
-    The package's top-level __init__ imports EVERY model, and one of them
-    (EvolveGCNO) requires `torch_sparse` — a C++ extension with no prebuilt
-    wheel on every torch/Python combination (e.g. Windows + Python 3.14).
-    GConvLSTM itself never uses torch_sparse, so when that unrelated extra is
-    missing we load the REAL gconv_lstm.py source directly instead of running
-    the package __init__. The returned class is the genuine GConvLSTM.
+    A memory allocation alone is not a valid probe — cudaMalloc succeeds
+    without any kernel image. We force a tiny elementwise kernel instead.
+    """
+    if torch.cuda.is_available():
+        try:
+            probe = torch.zeros(2, device='cuda')
+            _ = probe + 1                 # forces an actual CUDA kernel launch
+            torch.cuda.synchronize()
+            print("[device] Using CUDA")
+            return torch.device('cuda')
+        except RuntimeError as exc:
+            print(f"[device] CUDA present but unusable for this build "
+                  f"({exc}); falling back to CPU")
+    print("[device] Using CPU")
+    return torch.device('cpu')
+
+
+device = _pick_device()
+
+def load_gconvlstm():
+    """Load torch_geometric_temporal's GConvLSTM via a direct import.
+
+    A plain try-except import avoids the fragile package-introspection
+    fallback (importlib.metadata's `md.files(...)` can raise
+    PackageNotFoundError when the distribution's metadata is not registered,
+    e.g. after a `--no-deps` install). If the direct import fails, the missing
+    dependency is reported clearly instead of crashing halfway through.
     """
     try:
         from torch_geometric_temporal.nn.recurrent import GConvLSTM
         return GConvLSTM
-    except ImportError:
-        import importlib.metadata as md
-        import importlib.util as iu
-
-        matches = [f.locate() for f in md.files("torch_geometric_temporal")
-                   if str(f).endswith("recurrent/gconv_lstm.py")]
-        if not matches:
-            raise SystemExit(
-                "torch_geometric_temporal is required. Install it with "
-                "`pip install torch-geometric-temporal`.")
-        print("[import] torch_sparse unavailable on this platform; loading "
-              "GConvLSTM directly from its source file (it never uses it).")
-        spec = iu.spec_from_file_location("temporal_gconv_lstm", matches[0])
-        module = iu.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module.GConvLSTM
+    except ImportError as exc:
+        raise SystemExit(
+            "torch_geometric_temporal is required. Install it with "
+            "`pip install torch-geometric-temporal`."
+        ) from exc
 
 
 GConvLSTM = load_gconvlstm()
@@ -242,7 +258,7 @@ def run_one_epoch(model, X, edge_index, edge_weight, t_start, t_stop, criterion)
     next. Returns (mean_loss, final_h, final_c).
     """
     h = c = None
-    total = torch.tensor(0.0)
+    total = torch.tensor(0.0, device=X.device)   # accumulate where X lives
     for t in range(t_start, t_stop):
         h, c, pred = model(X[:, t:t + 1], edge_index, edge_weight, h, c)
         total = total + criterion(pred, X[:, t + 1:t + 2])   # next timestep, [N,1]
@@ -273,7 +289,7 @@ def train_gcnlstm(model, X, edge_index, edge_weight):
         model.eval()
         with torch.no_grad():
             hv, cv = h.detach(), c.detach()
-            val_total = torch.tensor(0.0)
+            val_total = torch.tensor(0.0, device=X.device)
             for t in range(t_inner - 1, T - 1):
                 hv, cv, pred = model(X[:, t:t + 1], edge_index, edge_weight, hv, cv)
                 val_total = val_total + criterion(pred, X[:, t + 1:t + 2])
@@ -401,8 +417,9 @@ def lstm_baseline(train_df, holdout_df, station_id):
 
 def persistence_baseline(X_train, X_holdout):
     """Naive 'last observed value repeats forever' baseline, for context."""
-    flat = np.repeat(X_train[:, -1:].numpy(), X_holdout.shape[1], axis=1)
-    return float(np.sqrt(np.mean((flat - X_holdout.numpy()) ** 2)))
+    # Tensors may be on the GPU — copy back to CPU before converting to numpy.
+    flat = np.repeat(X_train[:, -1:].cpu().numpy(), X_holdout.shape[1], axis=1)
+    return float(np.sqrt(np.mean((flat - X_holdout.cpu().numpy()) ** 2)))
 
 
 # ===========================================================================
@@ -428,6 +445,11 @@ def main():
     edge_index = build_edge_index(train_df, station_order)
     edge_weight = None
 
+    # Move data and graph to the compute device before training begins.
+    X_train = X_train.to(device)
+    X_holdout = X_holdout.to(device)
+    edge_index = edge_index.to(device)
+
     if X_train.shape[1] < VAL_MONTHS + 2:
         raise SystemExit("Not enough training months for the GCN-LSTM "
                          "(need more history in processed_math_data.csv).")
@@ -445,7 +467,7 @@ def main():
     # --- Core model --------------------------------------------------------
     print(f"\n[model] Training GCN-LSTM for {EPOCHS} epochs "
           f"(Adam, MSE, chronological train/val, no shuffle)")
-    model = GCNLSTM()
+    model = GCNLSTM().to(device)
     train_gcnlstm(model, X_train, edge_index, edge_weight)
 
     preds_scaled = recursive_forecast(model, X_train, X_holdout,
@@ -455,7 +477,7 @@ def main():
     print(f"[eval] GCN-LSTM RMSE (all stations, scaled) = {gcn_rmse:.4f}")
 
     # --- Forecast output: last forecast month, back in % units, clip >= 0 ---
-    last_forecast = preds_scaled[:, -1].numpy().reshape(-1, 1)          # [N,1]
+    last_forecast = preds_scaled[:, -1].detach().cpu().numpy().reshape(-1, 1)  # [N,1]
     forecast_pct = scaler.inverse_transform(last_forecast).ravel()
     forecast_pct = np.clip(forecast_pct, a_min=0.0, a_max=None)         # no negatives
 

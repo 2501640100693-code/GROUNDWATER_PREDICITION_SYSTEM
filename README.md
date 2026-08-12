@@ -7,6 +7,10 @@ retrospective, multi-year GEC-2015 / IN-GRES groundwater auditing cycle with a
 Recorder) telemetry.
 
 ```
+ data_fetcher.py — parses official India-WRIS / Data.gov.in CSVs, or
+ appends a simulated live telemetry feed; auto re-runs Builder 1 afterwards
+        │
+        ▼  writes the three input CSVs
  raw_dwlr_telemetry.csv      stations.csv      blocks.csv
         │                        │                 │
         ▼                        ▼                 ▼
@@ -52,6 +56,13 @@ python builder2_ml_pipeline.py          # -> ml_forecast_results.csv
 
 # 5. Builder 3 — launch the dashboard
 streamlit run app.py
+
+# 6. (optional) Live updates — either append a simulated 30-day feed ...
+python data_fetcher.py --simulate --days 30
+#    ... or parse an official India-WRIS / Data.gov.in CSV export
+python data_fetcher.py --fetch path/to/official_export.csv
+#    Both re-run Builder 1 automatically. The same path is exposed in the
+#    dashboard under the "Live vs. Audit" tab → "Fetch Live Telemetry Update".
 ```
 
 There is also a self-test for Builder 1's math (runs with plain Python, no
@@ -68,10 +79,11 @@ python test_builder1_math.py
 | File | Role |
 |------|------|
 | `make_sample_data.py` | Fabricates the three input CSVs (Punjab/Haryana, real lat/lon) so the pipeline runs end-to-end without government data. **Demo only.** |
+| `data_fetcher.py` | Ingestion + live-telemetry layer. `fetch_open_government_data()` parses official India-WRIS / Data.gov.in CSV schemas (fuzzy column-alias matching, so the many different export layouts all work) into the three Builder-1 inputs; `simulate_live_telemetry_stream()` appends realistic 6-hourly readings (monsoon recharge cycle + extraction-drawdown trend). Either path re-runs Builder 1 automatically. |
 | `builder1_ingest_math.py` | Validation gateway (rejects bad readings, prunes stations missing >30% of expected readings, inner-joins station/block metadata) + math engine (30-day z-score outliers, monthly resampling, confidence tiers, 12-month decline proxy, `×100` SoE proxy, category, drift flag, hysteresis alert). |
 | `test_builder1_math.py` | Regression tests that encode the two historic bugs: the `×100` (not `×1000`) proxy multiplier, and a genuine 2-year station being `HIGH` confidence. |
 | `builder2_ml_pipeline.py` | Chronological 6-month holdout split, train-only Min-Max scaling, a SARIMA and a plain-LSTM baseline, an intra-block station graph, and a **genuinely recurrent** GCN-LSTM (`torch_geometric_temporal.GConvLSTM`) whose hidden/cell state is threaded across timesteps. |
-| `app.py` | Streamlit dashboard: live map, sidebar alerts, per-station history + spliced 6-month forecast. |
+| `app.py` | Streamlit dashboard with a 4-tab `streamlit-option-menu`: **Live Map** (KPIs + map), **Time Series** (per-station history + spliced 6-month forecast), **Status Table**, and **Live vs. Audit** (official GEC-2015 vs live telemetry comparison + "Fetch Live Telemetry Update" button). Sidebar alerts/drift/filters are shared across all tabs. |
 | `.streamlit/config.toml` | Dark "emergency monitoring" theme. |
 | `requirements.txt` | Pinned dependencies (every line is `package==version`). |
 | `requirements-ml.txt` | The graph-ML package (`torch-geometric-temporal==0.56.2`), pinned separately because it drags in compiled `torch-sparse`/`torch-scatter` extensions that have no wheel on every platform. |
@@ -185,6 +197,16 @@ the two CSVs.
   forecast series, so Plotly draws one continuous line with no visual gap.
 - **`st_folium(...)`** passes `returned_objects=["last_object_clicked_tooltip"]`
   (required to avoid an infinite rerender loop) and `use_container_width=True`.
+- **4-tab navigation** via `streamlit-option-menu` (dark-theme styles match the
+  config.toml theme). The existing content is preserved unchanged under the
+  first three tabs.
+- **"Live vs. Audit" tab**: side-by-side official (GEC-2015) vs live
+  (telemetry) category counts with drift highlighting, a dual-axis Plotly chart
+  of official annual availability limits vs the live 12-month rolling
+  extraction proxy, and a per-station drift table. The **"Fetch Live Telemetry
+  Update"** button calls `data_fetcher.run_live_update()`, then
+  `st.cache_data.clear()` + `st.rerun()` reload the fresh
+  `processed_math_data.csv` — no server restart.
 
 ---
 
