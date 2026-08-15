@@ -1,4 +1,4 @@
-# AquaSentinel 💧
+# Jal dristhi💧
 
 A **groundwater early-warning dashboard** for Smart India Hackathon 2026,
 Problem Statement 25068 (Ministry of Jal Shakti). AquaSentinel replaces India's
