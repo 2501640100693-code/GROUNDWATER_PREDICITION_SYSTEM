@@ -38,6 +38,9 @@ imports another Builder's code, and there is no database.
 ## Quick start (local demo)
 
 ```bash
+# Recommended: Create and activate a virtual environment
+python3 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 # 1. Install dependencies (every version is pinned — see requirements.txt)
 pip install -r requirements.txt
 # Plus the graph-ML package. On platforms without torch-sparse/torch-scatter
