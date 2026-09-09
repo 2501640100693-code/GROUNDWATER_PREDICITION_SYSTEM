@@ -1,5 +1,5 @@
 """
-AquaSentinel dashboard (Builder 3)
+Jal Drishti dashboard (Builder 3)
 
 Reads processed_math_data.csv (Builder 1) and ml_forecast_results.csv
 (Builder 2). Doesn't touch a database, doesn't import the other builders.
@@ -33,7 +33,7 @@ NO_DATA_COLOR = "#7f8c8d"
 CATEGORY_ORDER = ["Safe", "Semi-Critical", "Critical",
                   "Over-Exploited", "Insufficient history"]
 
-PAGE_TITLE = "AquaSentinel — Groundwater Early-Warning Dashboard"
+PAGE_TITLE = "Jal Drishti — Groundwater Early-Warning Dashboard"
 st.set_page_config(page_title=PAGE_TITLE, layout="wide", page_icon="💧")
 
 
@@ -88,7 +88,7 @@ snapshot = (
 active_alerts = snapshot[snapshot["Alert_Active"] == True]        # noqa: E712
 
 with st.sidebar:
-    st.markdown("# 💧 AquaSentinel")
+    st.markdown("# 💧 Jal Drishti")
     st.caption("Groundwater Early-Warning Command Center")
     st.markdown("---")
 
@@ -341,7 +341,7 @@ with tab4:
     st.markdown(
         "#### ⚖️ Live vs. Audit",
         help=("Static GEC-2015 audit category vs. live DWLR telemetry that "
-              "AquaSentinel re-estimates monthly. Where the two diverge, the "
+              "Jal Drishti re-estimates monthly. Where the two diverge, the "
               "station is flagged as drifting."))
 
     if not filtered.empty:
