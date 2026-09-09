@@ -1,48 +1,11 @@
 """
-AquaSentinel — Builder 3: Executive Dashboard (Streamlit + Folium + Plotly)
-============================================================================
+AquaSentinel dashboard (Builder 3)
 
-Reads ONLY the two CSVs produced by the other Builders:
-    processed_math_data.csv   (Builder 1)
-    ml_forecast_results.csv   (Builder 2)
-It never touches a database and never imports another Builder's code.
+Reads processed_math_data.csv (Builder 1) and ml_forecast_results.csv
+(Builder 2). Doesn't touch a database, doesn't import the other builders.
 
-Navigation — 5 tabs:
-    1. Global Command   — KPI row, full-width Folium map, alerts in an expander
-    2. Station Analytics— per-station history + spliced GCN-LSTM forecast
-    3. Drift Matrix     — searchable/filterable audit table, all stations
-    4. Live vs. Audit   — static GEC-2015 audit vs. live telemetry, single-axis
-                           toggle between percentage and volumetric views
-    5. AI Performance   — reported model evaluation metric + forecast snapshot
-
-SCHEMA NOTE (read before editing): the only columns that exist are the ones
-Builder 1/2 actually write:
-    processed_math_data.csv -> Time, Station_ID, Water_Level, Latitude,
-        Longitude, Block_ID, Net_Availability, Official_Category,
-        Depth_Decline_Proxy, Estimated_SoE_Proxy_Pct, Estimated_Category,
-        Confidence, Drift_Flag, Alert_Active
-    ml_forecast_results.csv -> Station_ID, Forecasted_SoE_Proxy_Pct,
-        Forecast_Horizon_Months
-There is no State or District column anywhere in the pipeline, and no
-holdout/validation column in ml_forecast_results.csv. Do not invent either —
-see the sidebar filter and Tab 5 for how that's handled.
-
-Key implementation notes (carried over from the previous draft; unchanged):
-  * ONE shared "latest status" snapshot is computed a single time and is used
-    by every tab and the map. Two different queries caused a station that
-    recovered from a past alert to stay red in one place while showing blue
-    in another in an earlier version of this project.
-  * Map markers use the REAL Latitude/Longitude that Builder 1 carried
-    through. If they are genuinely absent we show a visible on-screen warning
-    instead of silently plotting fake positions.
-  * st_folium MUST receive returned_objects=["last_object_clicked_tooltip"]
-    (omitting it causes an infinite rerender loop) and use_container_width=True.
-  * The historical and forecast lines are spliced with no visual gap by
-    prepending the final historical point ("Time Zero") to the forecast series.
-  * The "Fetch Live Telemetry Update" button calls data_fetcher.run_live_update(),
-    then st.cache_data.clear() + st.rerun() pick up the fresh
-    processed_math_data.csv — no server restart needed. This logic is
-    untouched from the previous draft, only relocated into the sidebar.
+Tabs: Global Command, Station Analytics, Drift Matrix, Live vs. Audit,
+AI Performance.
 
 Run:  streamlit run app.py
 """
@@ -53,24 +16,18 @@ import folium
 import plotly.graph_objects as go
 from streamlit_folium import st_folium
 
-# data_fetcher is the optional ingestion layer behind the "Live vs. Audit"
-# fetch button. If it is ever missing, the dashboard stays up and simply
-# disables that button instead of crashing. UNCHANGED from the previous draft.
 try:
     import data_fetcher
     DATA_FETCHER_AVAILABLE = True
-except Exception:                                            # noqa: BLE001
+except Exception:
     DATA_FETCHER_AVAILABLE = False
 
-# ---------------------------------------------------------------------------
-# Explicit status -> colour mapping (rendered as HTML/CSS badges + table styling)
-# ---------------------------------------------------------------------------
 STATUS_COLORS = {
-    "Safe": "#2ecc71",               # green
-    "Semi-Critical": "#f1c40f",      # amber
-    "Critical": "#f39c12",           # orange
-    "Over-Exploited": "#e74c3c",     # red
-    "Insufficient history": "#95a5a6",  # gray
+    "Safe": "#2ecc71",
+    "Semi-Critical": "#f1c40f",
+    "Critical": "#f39c12",
+    "Over-Exploited": "#e74c3c",
+    "Insufficient history": "#95a5a6",
 }
 NO_DATA_COLOR = "#7f8c8d"
 CATEGORY_ORDER = ["Safe", "Semi-Critical", "Critical",
@@ -81,16 +38,12 @@ st.set_page_config(page_title=PAGE_TITLE, layout="wide", page_icon="💧")
 
 
 def status_color(category):
-    """Colour for a category, with a safe fallback."""
     return STATUS_COLORS.get(category, NO_DATA_COLOR)
 
 
 def status_badge(category):
-    """A small pill badge rendered via inline HTML/CSS.
-
-    We deliberately do NOT use st.metric(delta_color=...) — it only colours by
-    the numeric sign of `delta`, so every category string would look identical.
-    """
+    # st.metric's delta_color only reacts to numeric sign, not category
+    # strings, so badges are built by hand instead.
     color = status_color(category)
     return (
         f'<span style="background-color:{color};color:#0a0f1e;padding:2px 10px;'
@@ -99,10 +52,6 @@ def status_badge(category):
     )
 
 
-# ---------------------------------------------------------------------------
-# Data loading (cached so every Streamlit rerun does not re-read the CSVs)
-# UNCHANGED — same filenames, same parsing, same cache decorator.
-# ---------------------------------------------------------------------------
 @st.cache_data
 def load_math_data():
     return pd.read_csv("processed_math_data.csv", parse_dates=["Time"])
@@ -113,9 +62,6 @@ def load_forecast_data():
     return pd.read_csv("ml_forecast_results.csv")
 
 
-# ---------------------------------------------------------------------------
-# Load inputs; stop loudly if Builder 1's output is missing.
-# ---------------------------------------------------------------------------
 try:
     df = load_math_data()
 except FileNotFoundError:
@@ -131,10 +77,9 @@ except FileNotFoundError:
     st.warning("`ml_forecast_results.csv` not found — forecast lines are hidden. "
                "Run Builder 2 first:  python builder2_ml_pipeline.py")
 
-# ===========================================================================
-# THE ONE shared "latest status" snapshot. Every tab and the map read from
-# this single variable — never recomputed as separate queries. UNCHANGED.
-# ===========================================================================
+# Single shared snapshot — every tab and the map read from this, not a
+# separate query each, so a station can't show recovered in one place and
+# still-alerting in another.
 snapshot = (
     df.sort_values(["Station_ID", "Time"])
       .groupby("Station_ID", as_index=False)
@@ -142,28 +87,21 @@ snapshot = (
 )
 active_alerts = snapshot[snapshot["Alert_Active"] == True]        # noqa: E712
 
-# ===========================================================================
-# SIDEBAR — strict no-data rule: title, global filters, fetch button only.
-# No raw tables, no alert lists here — those live inside the tabs instead.
-# ===========================================================================
 with st.sidebar:
     st.markdown("# 💧 AquaSentinel")
     st.caption("Groundwater Early-Warning Command Center")
     st.markdown("---")
 
     st.markdown("### 🗂 Global Filters")
-    # SCHEMA NOTE: stations.csv/blocks.csv only carry Block_ID today — there is
-    # no State or District column anywhere in the pipeline, so only a Block
-    # filter is wired up here. Add State/District columns upstream to extend this.
+    # Only Block_ID exists in stations.csv/blocks.csv today — no State or
+    # District column anywhere in the pipeline yet.
     available_blocks = sorted(snapshot["Block_ID"].dropna().unique())
     selected_blocks = st.multiselect(
         "Block",
         available_blocks,
         default=available_blocks,
         key="sidebar_block_filter",
-        help=("Filters every tab and the map by Block_ID. State/District "
-              "filters aren't available yet — those columns don't exist in "
-              "stations.csv or blocks.csv."))
+        help="Filters every tab and the map by Block_ID.")
 
     st.markdown("---")
     fetch_clicked = st.button(
@@ -172,14 +110,11 @@ with st.sidebar:
         use_container_width=True,
         disabled=not DATA_FETCHER_AVAILABLE,
         key="sidebar_fetch_btn",
-        help=("Appends fresh 6-hourly DWLR readings and re-runs Builder 1's "
-              "math engine, then reloads the dashboard — no server restart. "
-              "Disabled because data_fetcher.py isn't available in this "
-              "environment." if not DATA_FETCHER_AVAILABLE else
+        help=("data_fetcher.py isn't available in this environment." if not
+              DATA_FETCHER_AVAILABLE else
               "Appends fresh 6-hourly DWLR readings and re-runs Builder 1's "
-              "math engine, then reloads the dashboard — no server restart."))
+              "math engine, then reloads the dashboard."))
 
-    # Fetch logic is UNCHANGED from the previous draft, only relocated here.
     if fetch_clicked:
         with st.spinner("Fetching live telemetry & recomputing early-warning math …"):
             try:
@@ -190,27 +125,20 @@ with st.sidebar:
                     f"✅ Live telemetry appended: {res['rows_appended']:,} new "
                     f"readings across {res['stations']} station(s) · Builder 1 "
                     f"{state}{extra}. Reloading dashboard …")
-            except Exception as exc:     # noqa: BLE001  surface the failure in-UI
+            except Exception as exc:
                 st.session_state["aqua_update_msg"] = f"⚠️ Update failed: {exc}"
         st.cache_data.clear()
         st.rerun()
     if st.session_state.get("aqua_update_msg"):
         st.info(st.session_state["aqua_update_msg"])
 
-# Sidebar-filtered snapshot — every tab below reads from this, not from
-# `snapshot` directly, so the Block filter applies dashboard-wide.
 filtered = snapshot[snapshot["Block_ID"].isin(selected_blocks)]
 
-# ===========================================================================
-# MAIN NAVIGATION — 5 tabs
-# ===========================================================================
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
     ["🗺️ Global Command", "📈 Station Analytics", "🔍 Drift Matrix",
      "⚖️ Live vs. Audit", "🧠 AI Performance"])
 
-# ===========================================================================
-# TAB 1 — GLOBAL COMMAND
-# ===========================================================================
+# ---------------------------------------------------------------- Tab 1 ---
 with tab1:
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Total Stations", len(filtered))
@@ -228,16 +156,27 @@ with tab1:
     if filtered.empty:
         st.warning("No stations match the current sidebar filters.")
     elif not has_coords:
-        # The spec is explicit: warn visibly, never fake coordinates.
         st.warning(
             "⚠️ No usable Latitude/Longitude found in the data, so the map is "
             "hidden. Run Builder 1 against a feed whose stations.csv includes "
             "real coordinates.")
     else:
         center = [filtered["Latitude"].mean(), filtered["Longitude"].mean()]
-        m = folium.Map(location=center, zoom_start=7, tiles="CartoDB dark_matter")
+        # CartoDB's hosted basemaps now require a registered API key, so we
+        # use the plain OpenStreetMap tile set instead (no key, no watermark).
+        m = folium.Map(location=center, zoom_start=7, tiles="OpenStreetMap")
 
-        for row in filtered.itertuples():
+        # has_coords only checks that the column has *some* valid values —
+        # individual stations can still be missing lat/lon (e.g. newly
+        # ingested real-data stations). folium raises a ValueError on any
+        # NaN location, so those rows are skipped here instead of crashing
+        # the whole map.
+        mappable = filtered.dropna(subset=["Latitude", "Longitude"])
+        skipped = len(filtered) - len(mappable)
+        if skipped:
+            st.caption(f"{skipped} station(s) hidden from the map — missing coordinates.")
+
+        for row in mappable.itertuples():
             color = status_color(row.Estimated_Category)
             popup = folium.Popup(
                 f"<b>{row.Station_ID}</b><br>Block {row.Block_ID}<br>"
@@ -276,9 +215,9 @@ with tab1:
                 d4.metric("Official category", d.Official_Category)
 
     with st.expander("🚨 Active Hysteresis Alerts", expanded=False):
-        st.caption("Alert turns ON above 72% and OFF below 68% — this "
-                   "hysteresis band stops a station flapping in and out of "
-                   "alert state on small fluctuations.")
+        st.caption("Alert turns ON above 72% and OFF below 68% so a station "
+                   "doesn't flap in and out of alert state on small "
+                   "fluctuations.")
         tab_alerts = filtered[filtered["Alert_Active"] == True]   # noqa: E712
         if tab_alerts.empty:
             st.success("No stations are currently above the alert threshold.")
@@ -292,9 +231,7 @@ with tab1:
                     f"{row.Estimated_SoE_Proxy_Pct:.1f}%",
                     unsafe_allow_html=True)
 
-# ===========================================================================
-# TAB 2 — STATION ANALYTICS
-# ===========================================================================
+# ---------------------------------------------------------------- Tab 2 ---
 with tab2:
     st.markdown("#### 📈 Station time series", unsafe_allow_html=True)
     stations_sorted = sorted(filtered["Station_ID"].unique())
@@ -303,8 +240,7 @@ with tab2:
         index=0 if stations_sorted else None,
         key="station_analytics_select",
         help="History is Builder 1's monthly extraction proxy. The dashed "
-             "segment is Builder 2's GCN-LSTM forecast, spliced onto the "
-             "final historical point so the line has no visual gap.")
+             "segment is Builder 2's GCN-LSTM forecast.")
 
     if station_id is None:
         st.info("No stations match the current sidebar filters.")
@@ -357,9 +293,7 @@ with tab2:
         else:
             st.info("No proxy history available for this station.")
 
-# ===========================================================================
-# TAB 3 — DRIFT MATRIX
-# ===========================================================================
+# ---------------------------------------------------------------- Tab 3 ---
 with tab3:
     st.markdown("#### 🔍 Full station audit", unsafe_allow_html=True)
 
@@ -402,16 +336,13 @@ with tab3:
     st.dataframe(styled, use_container_width=True, hide_index=True, height=560)
     st.caption(f"{len(drift_view)} of {len(filtered)} station(s) shown.")
 
-# ===========================================================================
-# TAB 4 — LIVE VS. AUDIT
-# ===========================================================================
+# ---------------------------------------------------------------- Tab 4 ---
 with tab4:
     st.markdown(
         "#### ⚖️ Live vs. Audit",
-        help=("Compares the static GEC-2015 audit (block-level official "
-              "category, refreshed every few years) with live DWLR telemetry "
-              "that AquaSentinel re-estimates monthly. Where the two diverge, "
-              "the station is flagged as drifting."))
+        help=("Static GEC-2015 audit category vs. live DWLR telemetry that "
+              "AquaSentinel re-estimates monthly. Where the two diverge, the "
+              "station is flagged as drifting."))
 
     if not filtered.empty:
         st.caption(f"Last telemetry reading: `{df['Time'].max():%Y-%m-%d %H:%M}`")
@@ -432,8 +363,8 @@ with tab4:
     mode = st.radio(
         "Chart mode", ["Extraction Proxy (%)", "Volumetric Units"],
         horizontal=True, key="live_audit_mode_radio",
-        help="Both views use a single Y-axis by design — dual-axis bar "
-             "charts are easy to misread at a glance.")
+        help="Single Y-axis by design — dual-axis bar charts are easy to "
+             "misread at a glance.")
 
     chart_df = (filtered[filtered["Estimated_SoE_Proxy_Pct"].notna()]
                 .sort_values(["Block_ID", "Station_ID"]).copy())
@@ -464,12 +395,10 @@ with tab4:
             showlegend=False, font=dict(color="#e2e8f0"))
         st.plotly_chart(fig, use_container_width=True)
     else:
-        # "Volumetric Units" mode: grouped bar, single shared Y-axis — no
-        # dual axes. Only real columns are used: Net_Availability is the
-        # official annual availability; Depth_Decline_Proxy is the 12-month
-        # decline the proxy % is computed from. These are a decline-based
-        # proxy for extraction, not an independently audited bcm figure —
-        # flagged via the tooltip rather than a paragraph.
+        # Net_Availability is the official annual availability figure;
+        # Depth_Decline_Proxy is the same 12-month decline the % proxy is
+        # derived from — a decline-based stand-in for extraction, not an
+        # independently metered volume.
         fig = go.Figure()
         fig.add_trace(go.Bar(
             x=chart_df["Station_ID"], y=chart_df["Net_Availability"],
@@ -490,8 +419,7 @@ with tab4:
             font=dict(color="#e2e8f0"))
         st.plotly_chart(fig, use_container_width=True)
         st.caption("Decline proxy is Builder 1's 12-month depth-decline figure, "
-                   "the same input the % proxy is derived from — not an "
-                   "independently metered extraction volume.")
+                   "not an independently metered extraction volume.")
 
     with st.expander("📋 Block-Level Audit Summary", expanded=True):
         bsum = (filtered.groupby("Block_ID", as_index=False)
@@ -526,33 +454,30 @@ with tab4:
             """,
             unsafe_allow_html=True)
 
-# ===========================================================================
-# TAB 5 — AI PERFORMANCE & VALIDATION
-# ===========================================================================
+# ---------------------------------------------------------------- Tab 5 ---
 with tab5:
     st.markdown("#### 🧠 AI Performance & Validation", unsafe_allow_html=True)
 
     m1, _, _ = st.columns(3)
     m1.metric(
         "GCN-LSTM Holdout RMSE", "0.1534",
-        help=("Reported evaluation metric from Builder 2's own training run "
+        help=("Reported evaluation metric from Builder 2's training run "
               "(scaled Estimated_SoE_Proxy_Pct, 6-month holdout). Not "
               "recomputed here — ml_forecast_results.csv only carries the "
-              "final point forecast, not holdout ground-truth, so this "
-              "dashboard displays the reported figure rather than deriving it."))
+              "final point forecast, not holdout ground-truth."))
 
     st.markdown(
-        "**Why Spatial Adjacency (GCN) matters:** a plain per-station LSTM "
-        "only ever sees one station's own history. The GCN-LSTM instead "
-        "connects every pair of stations that share a Block_ID, so it can "
-        "learn cross-boundary flow between neighboring monitoring points — "
-        "a block-wide drawdown shows up in a station's forecast before its "
+        "**Why spatial adjacency (GCN) matters:** a plain per-station LSTM "
+        "only ever sees one station's own history. The GCN-LSTM connects "
+        "every pair of stations that share a Block_ID, so it can learn "
+        "cross-boundary flow between neighboring monitoring points — a "
+        "block-wide drawdown shows up in a station's forecast before its "
         "own telemetry fully reflects it.")
 
     st.markdown("##### 📊 Current forecast snapshot")
-    st.caption("This is Builder 2's point forecast per station, not a "
-               "holdout-vs-actual validation chart — ml_forecast_results.csv "
-               "doesn't carry holdout ground-truth to plot against.")
+    st.caption("Builder 2's point forecast per station, not a holdout-vs-"
+               "actual validation chart — ml_forecast_results.csv doesn't "
+               "carry holdout ground-truth to plot against.")
 
     fc_view = forecast[forecast["Station_ID"].isin(filtered["Station_ID"])]
     if fc_view.empty:
